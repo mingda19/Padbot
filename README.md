@@ -2,16 +2,26 @@
 
 Telegram bot that ranks Watsons SG sanitary pads by price per pad. See [pad-bot-plan.md](pad-bot-plan.md).
 
-Built so far: scraper + DB schema (plan build steps 1-3). Bot, images and scheduling are not built yet.
+Built so far: scraper + DB schema, and the Telegram bot with photos and a scheduled refresh (plan build steps 1-6). Deployment (step 7) is not done.
 
 ```
 uv venv && uv pip install -e '.[dev]'
 pytest                                        # no network, no spend
 python -m padbot.scraper                      # PAID Apify run -> $PADBOT_DB (default ./padbot.db)
 python -m padbot.scraper --from-file raw/*.json   # replay saved Actor output, free
+python -m padbot.bot                          # run the Telegram bot (long polling)
 ```
 
-Secrets go in `.env` (git-ignored): `APIFY_TOKEN=...` (or the console's "Run Actor" URL in `APTIFY_RUN_ACTOR_API`).
+Settings go in `.env` (git-ignored):
+
+| Variable | |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | required for the bot (from @BotFather) |
+| `APIFY_TOKEN`, or `APTIFY_RUN_ACTOR_API` | Apify credentials; the latter is the console's "Run Actor" URL with the token embedded |
+| `TELEGRAM_ADMIN_CHAT_ID` | optional; gets an alert when a refresh runs or fails. Message the bot `/id` to find yours |
+| `PADBOT_AUTO_REFRESH` | `0` turns the scheduled refresh off (default on) |
+| `PADBOT_MIN_RUN_INTERVAL_HOURS` | minimum gap between paid runs (default 336, biweekly) |
+| `PADBOT_DB`, `PADBOT_RAW_DIR` | DB path (default `padbot.db`) and saved Actor output (default `raw/`). Relative paths are relative to the **project root**, never to the directory you start the process from |
 
 | File | Role |
 |---|---|
@@ -21,6 +31,9 @@ Secrets go in `.env` (git-ignored): `APIFY_TOKEN=...` (or the console's "Run Act
 | `src/padbot/parser.py` | name -> `pad_count`, `length_cm`, `is_pad` |
 | `src/padbot/promo.py` | multi-buy maths (`2 FOR $9.90`, `MIN 3 GET 33% OFF`) |
 | `src/padbot/scraper.py` | `run_scrape`: fetch -> parse -> upsert, one transaction per run |
+| `src/padbot/bot.py` | Telegram handlers, the `/pad` conversation, photo caching, the scheduled refresh job |
+| `src/padbot/refresh.py` | is a paid refresh due? runs it behind every spend guard |
+| `src/padbot/sizes.py`, `messages.py`, `repo.py` | size buckets and custom-length parsing; all bot text and keyboards; the bot's DB reads |
 
 ## Spike findings (2026-10-09)
 
@@ -60,7 +73,8 @@ Both Watsons hosts return **403 from Akamai** to plain HTTP clients, so `watsons
 
 **Cost controls enforced in code:**
 - `maxItems` (250 per category) and `maxTotalChargeUsd` are set on every run; reaching the item cap is treated as truncation and fails the run.
-- A paid run is refused if the previous run (any status) started less than `PADBOT_MIN_RUN_INTERVAL_HOURS` ago (default 336h, i.e. biweekly; `--force` overrides). The plan's "refresh in the background when data is stale" must go through this guard.
+- Before starting, the client asks **Apify itself** whether a successful run of the Actor happened within `PADBOT_MIN_RUN_INTERVAL_HOURS` (default 336h, i.e. biweekly) and refuses if so. Apify's history is the ground truth for spend, so this holds even if the local DB is empty or wrong. If the history can't be read it refuses too. A refusal is not recorded as a failed run.
+- The local DB enforces the same interval against its own last run (any status). `--force` skips both checks. The plan's "refresh in the background when data is stale" must go through this guard.
 - A run that ends non-`SUCCEEDED` or hangs past its timeout is aborted so billing stops.
 - The token is sent as a header, never in a URL (httpx logs URLs).
 - Every run's items are saved to `raw/` (last 20 kept) before the Apify dataset is deleted.
@@ -69,12 +83,24 @@ Both Watsons hosts return **403 from Akamai** to plain HTTP clients, so `watsons
 
 **Known gap: multi-buy labels.** The Actor does not return `promotionTags` for the promo labels the site shows (`2 FOR $7`, `MIN 3 GET 33% OFF`); those live in a field it drops. So `promo_*` columns stay NULL and only `original_price` (strikethrough) is available. The multi-buy code is tested and ready if a source ever supplies the labels.
 
+## The bot
+
+`/pad` asks for a size (Light 16-24cm, Medium 24-35cm, Heavy 35cm+, or Custom), then replies with the 5 cheapest in-stock pads per pad, each with **📷 n** (photo) and **🔗 n** (product page) buttons, plus **Show 5 more**. Every reply says how old the prices are and that they are Watsons online prices.
+
+- Custom accepts `28`, `28cm`, `28-32`, `28 - 32`, `28–32`, `28 to 32` (10-60cm, else it asks again). It is inclusive at both ends. A single length means that length ±0.5cm, because pads are listed at 23, 23.5, 24... and an exact match on 28 would hide 28.5. The reply names the range used.
+- Photos: the first tap makes Telegram fetch `image_url` and stores the returned `file_id`; later taps reuse it. A `file_id` Telegram rejects is dropped and refetched.
+- Old size keyboards keep working after a restart or timeout (the buttons are conversation entry points, not tied to one message).
+- The bot only reads the DB. Refreshing is a separate timer, **not** per user request, so spend can't scale with traffic. After each check it queues the next one for the moment a refresh is actually due (about 14 days after a good scrape), and logs the plan at startup, e.g. `database …/padbot.db: 145 products, last good scrape 0.0d ago; next refresh due 2026-10-23 09:08 UTC`. After a failure it looks again in 24h; after 3 failures in a row it stops and alerts the admin (`python -m padbot.scraper --force` once the cause is fixed).
+- **The first scrape is never automatic.** With no good run in the database the bot starts nothing and alerts instead; fill it once with `python -m padbot.scraper` (also on a new server). An empty database is much more likely to be the wrong database than a reason to spend.
+- Tests run the real Application and ConversationHandler against a fake Telegram transport (`tests/fake_telegram.py`), so they need no network or token.
+
 ## Differences from the plan
 
 - **Extra columns** `promo_text`, `promo_qty`, `promo_total`, `promo_price_per_pad`: the plan wants multi-buy maths but had nowhere to store it. `price_per_pad` stays the single-unit price, as in the plan's ranking query.
 - **Delisting**: the plan's prose (missed 2+ runs) and its query (`last_seen_at >= latest_ok_run_start`, i.e. missed 1) disagree. `db.ranking_cutoff` follows the prose.
 - **Non-pads are not stored.** Liners, tampons, period panties, cloth pads and incontinence pads (the plan's list plus `panty/panties`, `cloth pad`, `reusable`, `incontinence`, found in the spike) are dropped. `items_total` counts pads only, so the parse rate is meaningful.
 - **Name/field count conflicts** and ranges (`24-28cm`) are `parse_ok = 0` rather than guessed.
+- **Refresh trigger**: the plan has a user request kick off a background refresh when data is stale. Here a timer does it, scheduled for the due date (see The bot), so no user action can cost money. The plan's "scrape on startup if stale" is dropped for the same reason: the first scrape is manual.
 - **Staleness**: the plan's 6h refresh would cost ~$130/month, so freshness is now a budget decision (`PADBOT_MIN_RUN_INTERVAL_HOURS`), and "Prices as of ..." matters more.
 - **Failure handling**: a run is all-or-nothing (products and the `ok` marker commit together). A run is also discarded, keeping the old data, if the parse rate drops more than 25 points versus the previous ok run, or if the number of pads falls by more than 30%, or if the response shape or item counts are off.
 - `tg_file_id` is cleared whenever `image_url` changes, on every scrape, instead of in a separate monthly check.

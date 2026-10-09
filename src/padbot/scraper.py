@@ -22,7 +22,7 @@ from . import config, db
 from .apify import ApifyClient, ApifySettings, FileSource
 from .parser import ParseResult, parse_product
 from .promo import parse_multibuy
-from .watsons import RawProduct, SchemaError, ScrapeError
+from .watsons import RawProduct, SchemaError, ScrapeError, TooSoonError
 
 log = logging.getLogger("padbot.scraper")
 
@@ -31,10 +31,6 @@ class ProductSource(Protocol):
     def fetch_pad_products(self) -> list[dict]: ...
 
     def normalize_product(self, raw: dict) -> RawProduct: ...
-
-
-class TooSoonError(ScrapeError):
-    """A paid run was refused because the previous one was too recent."""
 
 
 # Skipping one odd SKU is fine; skipping many means the format changed.
@@ -169,6 +165,11 @@ def run_scrape(
     fetched or recorded."""
     started_at = now()
     _refuse_if_too_soon(conn, started_at, min_interval_s)
+    # A source may veto before anything is recorded or paid for (ApifyClient asks
+    # Apify itself), so a refusal leaves no 'failed' row behind.
+    preflight = getattr(source, "preflight", None)
+    if preflight is not None:
+        preflight()
     run_id = db.start_run(conn, started_at)
     try:
         result = _scrape(conn, source, run_id, started_at, now)
@@ -212,7 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             run_scrape(conn, FileSource(args.from_file))
         else:
             interval = 0 if args.force else config.MIN_RUN_INTERVAL_S
-            with ApifyClient(ApifySettings.from_env(), raw_dir=config.RAW_DIR) as client:
+            with ApifyClient(ApifySettings.from_env(), raw_dir=config.RAW_DIR, min_interval_s=interval) as client:
                 run_scrape(conn, client, min_interval_s=interval)
     except ScrapeError as exc:
         log.error("scrape failed: %s: %s", type(exc).__name__, exc)

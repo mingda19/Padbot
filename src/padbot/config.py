@@ -1,10 +1,24 @@
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()  # .env never overrides variables already set in the environment
+# The project root (where .env, padbot.db and raw/ live), found from this file,
+# not from the working directory. Starting the bot from another folder once
+# created a second, empty database and triggered a paid first scrape.
+ROOT = Path(__file__).resolve().parents[2]
 
-DB_PATH = os.environ.get("PADBOT_DB", "padbot.db")
+load_dotenv(ROOT / ".env")  # .env never overrides variables already set in the environment
+
+
+def resolve_path(value: str) -> str:
+    """Relative paths mean relative to ROOT, whatever directory we were started in.
+    (Installed outside a source checkout? Set absolute PADBOT_DB / PADBOT_RAW_DIR.)"""
+    path = Path(value).expanduser()
+    return str(path if path.is_absolute() else ROOT / path)
+
+
+DB_PATH = resolve_path(os.environ.get("PADBOT_DB", "padbot.db"))
 
 API_BASE = "https://api.watsons.com.sg/api/v2/wtcsg"
 SITE_BASE = "https://www.watsons.com.sg"
@@ -50,4 +64,12 @@ APIFY_MAX_ITEMS = 250
 MIN_RUN_INTERVAL_S = int(float(os.environ.get("PADBOT_MIN_RUN_INTERVAL_HOURS", "336")) * 3600)
 # Every paid run's raw items are kept here so a failed ingest can be replayed
 # for free (python -m padbot.scraper --from-file ...).
-RAW_DIR = os.environ.get("PADBOT_RAW_DIR", "raw")
+RAW_DIR = resolve_path(os.environ.get("PADBOT_RAW_DIR", "raw"))
+
+# --- Telegram bot ---------------------------------------------------------------
+RESULTS_PER_PAGE = 5
+# After a failed attempt (which may have been billed) wait this long before the
+# next, and stop trying by itself after this many failures in a row.
+REFRESH_FAILURE_COOLDOWN_S = 24 * 3600
+REFRESH_MAX_FAILURES = 3
+AUTO_REFRESH = os.environ.get("PADBOT_AUTO_REFRESH", "1") != "0"

@@ -155,6 +155,22 @@ def last_run_started_at(conn: sqlite3.Connection) -> str | None:
     return row["started_at"] if row else None
 
 
+def failures_since_last_ok(conn: sqlite3.Connection) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM scrape_runs WHERE status='failed' AND id > "
+        "COALESCE((SELECT MAX(id) FROM scrape_runs WHERE status='ok'), 0)"
+    ).fetchone()[0]
+
+
+def get_product(conn: sqlite3.Connection, product_code: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM products WHERE product_code = ?", (product_code,)).fetchone()
+
+
+def set_tg_file_id(conn: sqlite3.Connection, product_code: str, file_id: str | None) -> None:
+    conn.execute("UPDATE products SET tg_file_id = ? WHERE product_code = ?", (file_id, product_code))
+    conn.commit()
+
+
 def last_ok_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
     """The 'Prices as of ...' source: finished_at of the latest ok run."""
     return conn.execute(

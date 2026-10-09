@@ -25,6 +25,10 @@ class ScrapeError(Exception):
     pass
 
 
+class TooSoonError(ScrapeError):
+    """A paid run was refused because a recent one exists. Not a failure."""
+
+
 class BlockedError(ScrapeError):
     """403/429: the site told us to go away. Stop; don't retry or work around it."""
 

@@ -55,8 +55,9 @@ def catalogue():
 class FakeApify:
     """The four Apify endpoints we use, recording every request."""
 
-    def __init__(self, data, statuses=("SUCCEEDED",), post_status=201):
+    def __init__(self, data, statuses=("SUCCEEDED",), post_status=201, past_runs=(), history_status=200):
         self.data, self.statuses, self.post_status = data, list(statuses), post_status
+        self.past_runs, self.history_status = list(past_runs), history_status  # startedAt of earlier SUCCEEDED runs
         self.requests, self.runs, self.deleted, self.aborted = [], {}, [], []
 
     def calls(self, method, fragment=""):
@@ -72,6 +73,12 @@ class FakeApify:
             n = len(self.runs) + 1
             self.runs[f"run{n}"] = (f"ds{n}", body["categorySlug"])
             return httpx.Response(201, json={"data": {"id": f"run{n}", "defaultDatasetId": f"ds{n}", "status": "READY"}})
+        if request.method == "GET" and path.endswith("/runs") and path.startswith("/actors/"):
+            if self.history_status != 200:
+                return httpx.Response(self.history_status, json={"error": {"type": "x", "message": "nope"}})
+            assert dict(request.url.params) == {"status": "SUCCEEDED", "desc": "1", "limit": "1"}
+            items = [{"id": f"old{i}", "status": "SUCCEEDED", "startedAt": t} for i, t in enumerate(self.past_runs)]
+            return httpx.Response(200, json={"data": {"total": len(items), "items": items[:1]}})
         if request.method == "POST" and path.endswith("/abort"):
             self.aborted.append(path)
             return httpx.Response(200, json={"data": {}})
@@ -344,3 +351,57 @@ def test_a_source_that_silently_loses_half_the_catalogue_is_rejected(conn, tmp_p
     with pytest.raises(SchemaError, match="pads fell from 10 to 5"):
         run_scrape(conn, FileSource([tmp_path / "half.json"]), now=clock)
     assert conn.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 10
+
+
+# --- Apify-side spend guard (independent of the local DB) --------------------------------
+
+
+def ago(**kw):
+    return (datetime.now(timezone.utc) - timedelta(**kw)).isoformat().replace("+00:00", "Z")
+
+
+def test_a_recent_paid_run_on_apify_blocks_a_new_one_even_with_an_empty_database(conn, tmp_path):
+    """The incident: the bot was pointed at an empty DB, which hid that a full scan had just been paid for."""
+    fake = FakeApify(catalogue(), past_runs=[ago(minutes=30)])
+    with pytest.raises(TooSoonError, match=r"successful run of this Actor 0\.5h ago"):
+        run_scrape(conn, make(fake, tmp_path), now=clock)
+    assert not fake.calls("POST")  # nothing was started
+    assert conn.execute("SELECT COUNT(*) FROM scrape_runs").fetchone()[0] == 0  # a refusal is not a failed run
+    assert conn.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 0
+
+
+def test_an_old_enough_run_on_apify_does_not_block(conn, tmp_path):
+    fake = FakeApify(catalogue(), past_runs=[ago(days=15)])
+    run_scrape(conn, make(fake, tmp_path, min_interval_s=14 * 86400), now=clock)
+    assert len(fake.calls("POST")) == 2 and db.last_ok_run(conn) is not None
+
+
+def test_no_history_on_apify_does_not_block(conn, tmp_path):
+    run_scrape(conn, make(FakeApify(catalogue()), tmp_path), now=clock)
+    assert db.last_ok_run(conn) is not None
+
+
+def test_force_skips_the_apify_check_entirely(conn, tmp_path):
+    fake = FakeApify(catalogue(), past_runs=[ago(minutes=1)])
+    run_scrape(conn, make(fake, tmp_path, min_interval_s=0), now=clock)
+    assert not [r for r in fake.requests if r.method == "GET" and r.url.path.endswith("/runs")]  # not even asked
+
+
+def test_if_apify_history_cannot_be_read_nothing_is_started(conn, tmp_path):
+    fake = FakeApify(catalogue(), history_status=500)
+    with pytest.raises(ApifyError):
+        run_scrape(conn, make(fake, tmp_path), now=clock)
+    assert not fake.calls("POST")  # fails closed
+
+
+def test_the_history_check_happens_once_not_per_category(conn, tmp_path):
+    fake = FakeApify(catalogue())
+    run_scrape(conn, make(fake, tmp_path), now=clock)
+    history = [r for r in fake.requests if r.method == "GET" and r.url.path.endswith("/runs")]
+    assert len(history) == 1  # a second look would see the first category's run and refuse
+
+
+def test_unreadable_history_is_a_schema_error(tmp_path):
+    http = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, json={"data": {"items": [{"id": "x"}]}})))
+    with pytest.raises(SchemaError, match="startedAt"):
+        ApifyClient(ApifySettings(TOKEN), http=http).preflight()

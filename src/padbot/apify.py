@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 from . import config
-from .watsons import RawProduct, SchemaError, ScrapeError
+from .watsons import RawProduct, SchemaError, ScrapeError, TooSoonError
 
 log = logging.getLogger("padbot.apify")
 
@@ -113,6 +113,12 @@ class FileSource:
     def __init__(self, paths: Iterable[str | Path]):
         self.paths = [Path(p) for p in paths]
 
+    def __enter__(self) -> "FileSource":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
+
     def fetch_pad_products(self) -> list[dict]:
         items: list[dict] = []
         for path in self.paths:
@@ -145,6 +151,7 @@ class ApifyClient:
         http: httpx.Client | None = None,
         categories: tuple[str, ...] = config.PAD_CATEGORIES,
         max_items: int = config.APIFY_MAX_ITEMS,
+        min_interval_s: float = config.MIN_RUN_INTERVAL_S,
         run_timeout_s: int = 300,
         raw_dir: str | Path | None = None,
         keep_raw: int = 20,
@@ -157,6 +164,7 @@ class ApifyClient:
         self.http = http or httpx.Client(timeout=90.0)
         self.categories = categories
         self.max_items = max_items
+        self.min_interval_s = min_interval_s
         self.run_timeout_s = run_timeout_s
         self.raw_dir = Path(raw_dir) if raw_dir else None
         self.keep_raw = keep_raw
@@ -215,6 +223,37 @@ class ApifyClient:
         except (ValueError, KeyError, TypeError):
             pass
         raise SchemaError(f"unexpected Apify response: {resp.text[:200]}")
+
+    # -- spend guard -----------------------------------------------------------
+
+    def preflight(self) -> None:
+        """Refuse to start if Apify itself shows a successful run of this Actor
+        within min_interval_s. Apify's history is the ground truth for spend; the
+        local DB is not (a wrong or empty DB once hid a run that had just been
+        paid for). Fails closed: if the history can't be read, nothing is started."""
+        if not self.min_interval_s:
+            return
+        resp = self._request(
+            "GET",
+            f"/actors/{self.settings.actor}/runs",
+            retry=True,
+            params={"status": "SUCCEEDED", "desc": 1, "limit": 1},
+        )
+        items = self._data(resp).get("items")
+        if not isinstance(items, list):
+            raise SchemaError("unexpected run-history response from Apify")
+        if not items:
+            return
+        try:
+            started = datetime.fromisoformat(items[0]["startedAt"].replace("Z", "+00:00"))
+        except (KeyError, ValueError, AttributeError) as exc:
+            raise SchemaError(f"run history has no usable startedAt: {items[0]!r:.120}") from exc
+        age = (datetime.now(timezone.utc) - started).total_seconds()
+        if age < self.min_interval_s:
+            raise TooSoonError(
+                f"Apify shows a successful run of this Actor {age / 3600:.1f}h ago; minimum between paid "
+                f"runs is {self.min_interval_s / 3600:.0f}h (--force to override)"
+            )
 
     # -- one run -------------------------------------------------------------
 
