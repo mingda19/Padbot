@@ -1,0 +1,22 @@
+{
+  "code": "BP_72176",
+  "name": "Dream V-Gentle Overnight Panties M-L (Hip 32\" - 41\" & Waist Up To 35\") 2s",
+  "contentSizeUnit": "2s",
+  "ean": "4894819795150",
+  "elabOldPrice": {"currencyIso": "SGD", "formattedValue": "S$2.05", "priceType": "BUY", "value": 2.05},
+  "elabPrice": {"currencyIso": "SGD", "formattedValue": "S$2.05", "priceType": "BUY", "value": 2.05},
+  "images": [{"url": "https://medias.watsons.com.sg/publishing/WTCSG-72176-front-yWFe2rLe-prodcat.png?version=1791130301"}],
+  "isStockLoaded": false,
+  "masterBrand": {"abrand": false, "brandUrl": "/all-brands/b/227366/pure-n-soft", "code": "227366", "isFeatured": false, "name": "PURE N SOFT"},
+  "price": {"currencyIso": "SGD", "formattedValue": "S$2.05", "priceType": "BUY", "value": 2.05},
+  "priceRange": {},
+  "promotionFirstTag": "3 FOR $4.90",
+  "promotionTags": [],
+  "purchasable": false,
+  "sellQuantity": 132,
+  "stock": {"stockLevelStatus": "inStock"},
+  "strikeThroughPrice": 2.05,
+  "topPromotion": {"badge": {"image": {}}, "isMemberPromotionFlag": false, "tag": {"label": "3 FOR $4.90"}, "title": "3 FOR $4.90"},
+  "url": "/pure-n-soft-dream-v-gentle-overnight-panties-m-l-hip-32-41-waist-up-to-35-2s/p/BP_72176",
+  "volumePricesFlag": false
+}
